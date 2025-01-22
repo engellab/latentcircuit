@@ -21,7 +21,7 @@ def prob_right(x):
 
 
 def psychometric(net,u,conditions):
-    par0 = sy.array([0., 1.])
+    par0 = np.array([0., 1.])
     contrasts = np.linspace(-1, 1, 15)
     x = net.forward(u)
     output = net.output_layer(x)
