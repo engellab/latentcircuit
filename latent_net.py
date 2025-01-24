@@ -20,12 +20,14 @@ class LatentNet(torch.nn.Module):
         self.device = device
 
         # Initialize connectivity layers
-        self.recurrent_layer = nn.Linear(self.n, self.n, bias=False)
+        self.recurrent_layer = nn.Linear(self.n, self.n, bias=True)
         self.recurrent_layer.weight.data.normal_(mean=0., std=0.025).to(device=self.device)
+        self.recurrent_layer.bias.data.normal_(mean=0.2, std=0).to(device=device)
+        self.recurrent_layer.bias.requires_grad = False
         self.input_layer = nn.Linear(self.input_size, self.n, bias=False)
-        self.input_layer.weight.data.normal_(mean=0.2, std=.1).to(device=self.device)
+        self.input_layer.weight.data.normal_(mean=0.2, std=.01).to(device=self.device)
         self.output_layer = nn.Linear(self.n, self.output_size, bias=False)
-        self.output_layer.weight.data.normal_(mean=.2, std=0.1).to(device=self.device)
+        self.output_layer.weight.data.normal_(mean=.2, std=0.01).to(device=self.device)
 
         # Initialize embedding matrix, q
         self.a = torch.nn.Parameter(torch.rand(self.N, self.N, device=self.device), requires_grad=True)
@@ -76,19 +78,22 @@ class LatentNet(torch.nn.Module):
             states = torch.cat((states, state_new.unsqueeze_(1)), 1)
         return states
 
-    def loss_function(self, x, z, y, l_y):
+    def loss_function(self, x, z, y, l_y, y_mask):
         # Loss function penalizes errors in outputs and hidden states.
-        return self.mse_z(x, z)+ l_y * self.nmse_y(y,x)
+        return self.mse_z(x, z)+ l_y * self.nmse_y(y,x,y_mask)
 
     def mse_z(self, x, z):
-        # Mean squared error for task performance.
-        return torch.sum(((self.output_layer(x) - z) )**2 ) / x.shape[0] / x.shape[1]
 
-    def nmse_x(self, y, x):
+        # Mean squared error for task performance.
+        return torch.sum((( (self.output_layer(x) - z)) )**2 ) / x.shape[0] / x.shape[1]
+
+    def nmse_x(self, y, x,mask):
+        mask = mask[:x.shape[0], :]
         # Normalized mean squared error between projected trajectories (hidden states) and latents.
         mse = nn.MSELoss(reduction='mean')
         y_bar = y - torch.mean(y, dim=[0, 1], keepdim=True)
-        return mse(y @ self.q.t(), x) / mse(y_bar, torch.zeros_like(y_bar))
+        x = (x - torch.mean(x, dim=[0, 1], keepdim=True)) / torch.std(x, dim=[0, 1], keepdim=True)
+        return mse((y * mask) @ self.q.t(), (mask*(x @ self.q))@ self.q.t()) / mse(mask * y_bar, torch.zeros_like(mask * y_bar))
 
     def nmse_q(self, y):
         # Normalized mean squared error between trajectories and projected trajectories. This error can be interpreted
@@ -97,14 +102,18 @@ class LatentNet(torch.nn.Module):
         y_bar = y - torch.mean(y, dim=[0, 1], keepdim=True)
         return mse(y @ self.q.t() @ self.q, y) / mse(y_bar, torch.zeros_like(y_bar))
 
-    def nmse_y(self, y,x):
+    def nmse_y(self, y,x, mask):
+        mask = mask[:x.shape[0], :]
         # Mean squared error between trajectories and embedded trajectories of the latent circuit model.
         mse = nn.MSELoss(reduction='mean')
         y_bar = y - torch.mean(y, dim=[0, 1], keepdim=True)
-        return mse(x @ self.q, y) / mse(y_bar, torch.zeros_like(y_bar))
+
+        # z-score x
+        x = (x - torch.mean(x,dim=[0, 1], keepdim=True)) / torch.std(x, dim=[0, 1], keepdim=True)
+        return mse(mask*(x @ self.q), mask * y) / mse(mask * y_bar, torch.zeros_like(mask * y_bar))
 
     # Function for fitting latent circuit model.
-    def fit(self, u, z, y, epochs, lr,l_y,weight_decay):
+    def fit(self, u, z, y, epochs, lr,l_y,weight_decay, y_mask):
 
         # Initialize optimizer and wrap training data as PyTorch dataset
         optimizer = torch.optim.Adam(self.parameters(), lr=lr,weight_decay = weight_decay)
@@ -118,7 +127,7 @@ class LatentNet(torch.nn.Module):
             for batch_idx, (u_batch, z_batch, y_batch) in enumerate(my_dataloader):
                 optimizer.zero_grad()
                 x_batch = self.forward(u_batch)
-                loss = self.loss_function(x_batch, z_batch, y_batch,l_y)
+                loss = self.loss_function(x_batch, z_batch, y_batch,l_y,y_mask)
                 epoch_loss += loss.item() / epochs
                 loss.backward()
                 optimizer.step()
@@ -133,6 +142,6 @@ class LatentNet(torch.nn.Module):
                 x = self.forward(u)
                 print('Epoch: {}/{}.............'.format(i, epochs), end=' ')
                 print("mse_z: {:.4f}".format(self.mse_z(x, z).item()), end=' ')
-                print("nmse_y: {:.4f}".format(self.nmse_y(y,x).item()))
+                print("nmse_y: {:.4f}".format(self.nmse_y(y,x,y_mask).item()))
                 loss_history.append(epoch_loss)
         return loss_history
